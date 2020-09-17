@@ -32,3 +32,4 @@ spam_cutoff <- 9999
 follower_cutoff <- -1
 hashtag_cutoff <- 281
 at_cutoff <- 281
+newline_n <- 281
