@@ -58,9 +58,9 @@ not_tweeting_that <- rbind(
     reason = rep(
       "ban",
       sum(banned_index)
-      )
     )
   )
+)
 avail_tweets <- avail_tweets[!(banned_index), ]
 
 # drop accounts with fewer than a set number of followers (in config.R)
@@ -81,7 +81,7 @@ not_tweeting_that <- rbind(
 avail_tweets <- avail_tweets[!follower_index, ]
 
 # drop a list of banned tweet sources (defined in config.R)
-# this is the second most common way I filter out spam -- a lot of 
+# this is the second most common way I filter out spam -- a lot of
 # "news aggregator" twitter accounts (which add noise without signal)
 # use the same 6-7 apps to post (which no real human uses)
 source_index <- avail_tweets$source %in% banned_sources &
@@ -98,12 +98,44 @@ not_tweeting_that <- rbind(
 )
 avail_tweets <- avail_tweets[!source_index, ]
 
+# drop a very specific flavor of spam: "essay writing" services
+# no exceptions allowed
+essay_spam_index <- grepl("Pay us to do|Pay us to write|DM us for|Pay us for", avail_tweets$text, ignore.case = TRUE)
+not_tweeting_that <- rbind(
+  not_tweeting_that,
+  cbind(
+    avail_tweets[essay_spam_index, ],
+    reason = rep(
+      "essay_spam",
+      sum(essay_spam_index)
+    )
+  )
+)
+avail_tweets <- avail_tweets[!essay_spam_index, ]
+
+# and a follow-up filter that's slightly more forgiving
+# newline_n in config.R
+essay_spam_index <- vapply(avail_tweets$nhash, function(x) length(strsplit(x, "\n")[[1]]), numeric(1)) > newline_n &
+  !(avail_tweets$user_id %in% permitted) &
+  !(avail_tweets$query == "#EcologyTwitter -filter:replies")
+not_tweeting_that <- rbind(
+  not_tweeting_that,
+  cbind(
+    avail_tweets[essay_spam_index, ],
+    reason = rep(
+      "probable_essay_spam",
+      sum(essay_spam_index)
+    )
+  )
+)
+
 # drop people who use too many hashtags (as defined in config.R)
 # for the areas ecology_tweets is interested in, there are a _ton_ of people
 # who post a single sentence, a link to the Guardian, and 80 hashtags.
 # that's not what we're here for.
 hashtag_index <- vapply(avail_tweets$nhash, function(y) length(y), numeric(1)) >= hashtag_cutoff &
-  !(avail_tweets$user_id %in% permitted)
+  !(avail_tweets$user_id %in% permitted) &
+  !(avail_tweets$query == "#EcologyTwitter -filter:replies")
 not_tweeting_that <- rbind(
   not_tweeting_that,
   cbind(
@@ -116,8 +148,8 @@ not_tweeting_that <- rbind(
 )
 avail_tweets <- avail_tweets[!(hashtag_index), ]
 
-# and last but not least, drop people who @ too many people
-# it is very, very rare for a tweet to exhibit this spam-signal and not 
+# drop people who @ too many people
+# it is very, very rare for a tweet to exhibit this spam-signal and not
 # the hashtag spam signal
 # as ever, at_cutoff is in config.R
 at_index <- vapply(avail_tweets$nat, function(y) length(y), numeric(1)) >= at_cutoff &
@@ -135,13 +167,30 @@ not_tweeting_that <- rbind(
 )
 avail_tweets <- avail_tweets[!at_index, ]
 
+# and a last line of defense, minor content blocking rules:
+spam_keyword_index <- grepl("zazzle", avail_tweets$text, ignore.case = TRUE)
+not_tweeting_that <- rbind(
+  not_tweeting_that,
+  cbind(
+    avail_tweets[spam_keyword_index, ],
+    reason = rep(
+      "spam_keyword",
+      sum(spam_keyword_index)
+    )
+  )
+)
+avail_tweets <- avail_tweets[!spam_keyword_index, ]
+
+
 # prepping for logging -- we want to make sure we log a 0 for each rule
 # when it didn't filter any tweets
-rule_levels <- c("atting", "spam", "ban", "hashtags", "followers_rule", "source_app")
+rule_levels <- c("atting", "spam", "ban", "hashtags", "followers_rule", "source_app", "essay_spam", "probable_essay_spam", "spam_keyword")
 rule_table <- table(factor(not_tweeting_that$reason, levels = rule_levels))
+
+banned_acct_number <- as.numeric(dbGetQuery(con, "SELECT COUNT(1) FROM banned_accounts;")[[1, 1]])
 # Write to a logfile for Telegraf to tail and send to Influx
 # This logs using Influx line protocol
-# You could argue for having the rule levels as tags and writing these as 
+# You could argue for having the rule levels as tags and writing these as
 # separate metrics, but at this scale I think limiting the complexity is better
 write(paste0(
   "metatweet,acct=",
@@ -152,17 +201,20 @@ write(paste0(
   nrow(avail_tweets),
   ",n_filtered=",
   nrow(not_tweeting_that),
+  ",n_banned=",
+  banned_acct_number,
   paste0(
     mapply(
-      function(x, y) paste0(",", x, "=", y), 
-      x = names(rule_table), 
+      function(x, y) paste0(",", x, "=", y),
+      x = names(rule_table),
       y = rule_table
-      ), 
-    collapse = ""),
+    ),
+    collapse = ""
+  ),
   " ",
   as.numeric(Sys.time()) * 1e9 # UNIX timestamp in nanoseconds
 ),
-"ecotweet.log",
+paste0(acct_name, ".log"), # config.R
 append = TRUE
 )
 
